@@ -345,6 +345,7 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_BRIDGE_BINARY` | `whatsapp-bridge/whatsapp-bridge`      | Bridge binary launched by auto-start         |
 | `WHATSAPP_BRIDGE_DIR`  | `whatsapp-bridge/`                       | Working directory (where `store/` lives) for the auto-started bridge |
 | `WHATSAPP_BRIDGE_STARTUP_TIMEOUT` | `60`                          | Seconds to wait for an auto-started bridge to come online |
+| `WHATSAPP_BRIDGE_STOP_ON_EXIT` | `true`                           | Stop the auto-started bridge when the MCP server exits |
 
 ### Bridge authentication and media paths
 
@@ -377,12 +378,19 @@ hand. It happens in two places:
   MCP server starts the bridge, waits for it to come online, and retries the
   request once.
 
-The bridge is launched detached (it keeps running after the MCP server exits)
-with its working directory set to `whatsapp-bridge/` and output appended to
-`whatsapp-bridge/store/bridge.log`. If `whatsapp-bridge/whatsapp-bridge` does
-not exist yet and Go is on `PATH`, it is built once with `go build`. A file
-lock prevents two MCP clients (e.g. Claude Desktop and Cursor starting
-together) from spawning duplicate bridges.
+The bridge is launched with its working directory set to `whatsapp-bridge/`
+and output appended to `whatsapp-bridge/store/bridge.log`. If
+`whatsapp-bridge/whatsapp-bridge` does not exist yet and Go is on `PATH`, it
+is built once with `go build`. A file lock prevents two MCP clients (e.g.
+Claude Desktop and Cursor starting together) from spawning duplicate bridges.
+
+By default the bridge's lifetime follows the MCP server: when the MCP server
+exits (e.g. you quit Claude Desktop), it stops the bridge it started.
+Messages received while everything is closed are delivered by WhatsApp the
+next time the bridge connects. Set `WHATSAPP_BRIDGE_STOP_ON_EXIT=false` to
+leave the bridge running in the background instead. A bridge you started
+yourself (terminal, launchd) is never stopped, and if another MCP client is
+still open it simply restarts the bridge on its next send.
 
 Auto-start only manages a **local** bridge: it is skipped when
 `WHATSAPP_API_URL` points at a non-loopback host. Set

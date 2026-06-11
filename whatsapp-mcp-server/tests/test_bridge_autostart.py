@@ -17,9 +17,12 @@ def bridge_env(monkeypatch, tmp_path):
         "WHATSAPP_BRIDGE_DIR",
         "WHATSAPP_BRIDGE_PORT",
         "WHATSAPP_BRIDGE_STARTUP_TIMEOUT",
+        "WHATSAPP_BRIDGE_STOP_ON_EXIT",
         "WHATSAPP_API_URL",
     ):
         monkeypatch.delenv(var, raising=False)
+    monkeypatch.setattr(bridge, "_spawned_proc", None)
+    monkeypatch.setattr(bridge, "_atexit_registered", False)
     bridge_dir = tmp_path / "whatsapp-bridge"
     bridge_dir.mkdir()
     monkeypatch.setenv("WHATSAPP_BRIDGE_DIR", str(bridge_dir))
@@ -40,8 +43,21 @@ class FakeProc:
     def __init__(self, pid=4242, exit_code=None):
         self.pid = pid
         self._exit_code = exit_code
+        self.terminated = False
+        self.killed = False
 
     def poll(self):
+        return self._exit_code
+
+    def terminate(self):
+        self.terminated = True
+        self._exit_code = 0
+
+    def kill(self):
+        self.killed = True
+        self._exit_code = -9
+
+    def wait(self, timeout=None):
         return self._exit_code
 
 
@@ -242,6 +258,39 @@ def test_startup_timeout_mentions_qr_pairing(monkeypatch, bridge_env):
 
     assert ok is False
     assert "QR" in detail
+
+
+def test_spawn_registers_exit_hook_that_stops_the_bridge(monkeypatch, bridge_env):
+    make_fake_binary(bridge_env)
+    listening_after(monkeypatch, failures=2)
+    proc = FakeProc()
+    monkeypatch.setattr(bridge.subprocess, "Popen", lambda args, **kwargs: proc)
+    registrations = []
+    monkeypatch.setattr(bridge.atexit, "register", lambda fn: registrations.append(fn))
+
+    ok, _ = bridge.ensure_bridge_running()
+
+    assert ok is True
+    assert registrations == [bridge._stop_spawned_bridge]
+
+    bridge._stop_spawned_bridge()
+    assert proc.terminated is True
+
+
+def test_stop_on_exit_disabled_leaves_bridge_running(monkeypatch):
+    monkeypatch.setenv("WHATSAPP_BRIDGE_STOP_ON_EXIT", "false")
+    proc = FakeProc()
+    monkeypatch.setattr(bridge, "_spawned_proc", proc)
+
+    bridge._stop_spawned_bridge()
+
+    assert proc.terminated is False
+
+
+def test_stop_hook_never_touches_bridges_we_did_not_spawn():
+    # _spawned_proc is None (reset by the autouse fixture): a bridge that was
+    # already running — manual, launchd, or another client's — must be left alone.
+    bridge._stop_spawned_bridge()
 
 
 def test_send_message_starts_bridge_and_retries(monkeypatch):

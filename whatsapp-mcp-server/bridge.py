@@ -17,8 +17,15 @@ Two constraints from the bridge itself shape this module:
   "listening" implies "connected". First-time QR pairing cannot happen
   headlessly (the QR code would only land in the log file); that first
   run still needs a terminal.
+
+By default the bridge's lifetime follows this process: an atexit hook
+stops a bridge we spawned, so quitting the MCP client also shuts the
+bridge down (WHATSAPP_BRIDGE_STOP_ON_EXIT=false keeps it running for
+background message sync). Bridges started by anything else are never
+touched.
 """
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -47,6 +54,12 @@ _GO_BUILD_TIMEOUT_SECONDS = 300
 # session (StreamReplaced loops), so both layers matter.
 _thread_lock = threading.Lock()
 
+# Bridge process spawned by this MCP server (None if the bridge was already
+# running or started by someone else). The atexit hook only ever stops this
+# process, so manual / launchd / other clients' bridges are left alone.
+_spawned_proc: subprocess.Popen | None = None
+_atexit_registered = False
+
 
 def _api_base_url() -> str:
     return os.getenv("WHATSAPP_API_URL", "http://localhost:8080/api").rstrip("/")
@@ -54,6 +67,10 @@ def _api_base_url() -> str:
 
 def _autostart_enabled() -> bool:
     return os.getenv("WHATSAPP_BRIDGE_AUTOSTART", "true").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _stop_on_exit_enabled() -> bool:
+    return os.getenv("WHATSAPP_BRIDGE_STOP_ON_EXIT", "true").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _startup_timeout() -> float:
@@ -196,6 +213,35 @@ def _try_lock(fh: TextIO) -> bool:
         return False
 
 
+def _stop_spawned_bridge() -> None:
+    """atexit hook: stop the bridge this process spawned.
+
+    Checked at shutdown time so WHATSAPP_BRIDGE_STOP_ON_EXIT can opt the
+    bridge out and leave it syncing messages in the background.
+    """
+    proc = _spawned_proc
+    if proc is None or proc.poll() is not None or not _stop_on_exit_enabled():
+        return
+    print(f"whatsapp-bridge autostart: stopping bridge (pid {proc.pid})", file=sys.stderr)
+    try:
+        proc.terminate()  # the bridge traps SIGTERM and disconnects cleanly
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
+    except (OSError, subprocess.SubprocessError):
+        pass  # already gone or unkillable; nothing useful left to do
+
+
+def _register_spawned(proc: subprocess.Popen) -> None:
+    global _spawned_proc, _atexit_registered
+    _spawned_proc = proc
+    if not _atexit_registered:
+        atexit.register(_stop_spawned_bridge)
+        _atexit_registered = True
+
+
 def ensure_bridge_running() -> tuple[bool, str]:
     """Make sure the bridge REST API is reachable, starting the bridge if needed.
 
@@ -244,6 +290,7 @@ def ensure_bridge_running() -> tuple[bool, str]:
                 if binary is None:
                     return False, reason
                 proc = _spawn_bridge(binary, log_fh)
+                _register_spawned(proc)
             return _wait_until_listening(proc, deadline)
         finally:
             lock_fh.close()
