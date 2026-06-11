@@ -57,6 +57,10 @@ A Model Context Protocol (MCP) server for WhatsApp, enabling Claude to read and 
    `whatsapp-bridge/store/.bridge-token`. Scan the QR code with WhatsApp on
    your phone to authenticate.
 
+   This manual start is only needed for the first-time QR pairing. Afterwards
+   the MCP server starts the bridge automatically whenever it isn't running
+   (see [Bridge auto-start](#bridge-auto-start)).
+
 3. **Configure Claude Desktop**
 
    Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
@@ -337,6 +341,11 @@ Copy `.env.example` to `.env` and configure as needed:
 | `WHATSAPP_API_URL`     | `http://localhost:8080/api`              | Go bridge REST API URL                       |
 | `WHATSAPP_BRIDGE_TOKEN` | generated in `whatsapp-bridge/store/.bridge-token` | Bearer token required for bridge REST calls |
 | `WHATSAPP_MEDIA_ROOTS` | `~/.local/share/whatsapp-mcp/outbox`     | Path-list of directories allowed for outbound media files |
+| `WHATSAPP_BRIDGE_AUTOSTART` | `true`                              | Let the MCP server start the bridge when it isn't running |
+| `WHATSAPP_BRIDGE_BINARY` | `whatsapp-bridge/whatsapp-bridge`      | Bridge binary launched by auto-start         |
+| `WHATSAPP_BRIDGE_DIR`  | `whatsapp-bridge/`                       | Working directory (where `store/` lives) for the auto-started bridge |
+| `WHATSAPP_BRIDGE_STARTUP_TIMEOUT` | `60`                          | Seconds to wait for an auto-started bridge to come online |
+| `WHATSAPP_BRIDGE_STOP_ON_EXIT` | `true`                           | Stop the auto-started bridge when the MCP server exits |
 
 ### Bridge authentication and media paths
 
@@ -355,6 +364,43 @@ Outbound `media_path` values are confined to `WHATSAPP_MEDIA_ROOTS`. The default
 outbox is `~/.local/share/whatsapp-mcp/outbox`, created on bridge startup. Move
 files there before calling `send_file` or `send_audio_message`, or set
 `WHATSAPP_MEDIA_ROOTS` to a colon-separated list of absolute directories.
+
+### Bridge auto-start
+
+The MCP server starts the bridge by itself when it isn't already running, so
+after the one-time QR pairing you normally never need to launch the bridge by
+hand. It happens in two places:
+
+- **At MCP server startup** — a background thread health-checks the bridge and
+  starts it if needed, so message sync resumes as soon as Claude Desktop (or
+  Cursor) launches.
+- **On demand** — if a send/react/download call hits a connection error, the
+  MCP server starts the bridge, waits for it to come online, and retries the
+  request once.
+
+The bridge is launched with its working directory set to `whatsapp-bridge/`
+and output appended to `whatsapp-bridge/store/bridge.log`. If
+`whatsapp-bridge/whatsapp-bridge` does not exist yet and Go is on `PATH`, it
+is built once with `go build`. A file lock prevents two MCP clients (e.g.
+Claude Desktop and Cursor starting together) from spawning duplicate bridges.
+
+By default the bridge's lifetime follows the MCP server: when the MCP server
+exits (e.g. you quit Claude Desktop), it stops the bridge it started.
+Messages received while everything is closed are delivered by WhatsApp the
+next time the bridge connects. Set `WHATSAPP_BRIDGE_STOP_ON_EXIT=false` to
+leave the bridge running in the background instead. A bridge you started
+yourself (terminal, launchd) is never stopped, and if another MCP client is
+still open it simply restarts the bridge on its next send.
+
+Auto-start only manages a **local** bridge: it is skipped when
+`WHATSAPP_API_URL` points at a non-loopback host. Set
+`WHATSAPP_BRIDGE_AUTOSTART=false` if you run the bridge under your own process
+manager (such as the launchd setup below).
+
+**First run still needs a terminal:** pairing prints a QR code, which an
+auto-started bridge can only write to its log file. Run `go run .` in
+`whatsapp-bridge/` once to scan the QR code; auto-start takes over from then
+on.
 
 ### Run automatically on macOS
 
